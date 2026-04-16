@@ -19,12 +19,12 @@
 const uint32_t RS_Speed = 2000000;	      // (921600) скорость соединения по Serial
 const uint32_t RS_pin = 12;			          // выход для переключения направления передачи
 const uint32_t Server_Timeout = 2000;     // таймаут сервера
-#define BUF_MAX 256
+#define BUF_MAX 256 // позволяет полностью загрузить весь пакет modbus
 
-const size_t charTimeoutMicros = 20;    // pause indicating the end of a continuous packet, таймаут Serial
+const size_t charTimeoutMicros = 1000000 / (RS_Speed /10) * 4; //20; // pause indicating the end of a continuous packet, таймаут Serial
 uint8_t ipBuf[BUF_MAX];
 uint8_t serBuf[BUF_MAX];
-uint8_t serPos = 0;
+size_t serCount = 0;
 size_t serLastByteMicros = 0;
 
 const size_t channelTimeoutMillis = 2000; // Сброс источника через 2 сек тишины
@@ -137,7 +137,7 @@ void ClearSerial()
     size_t toRead = (avail > sizeof(ipBuf)) ? sizeof(ipBuf) : avail;
     if (toRead)
     {
-      Serial.readBytes(serBuf, toRead);
+      Serial.read(serBuf, toRead);
       serBuf[toRead - 1] = 0;
       DPPRINTLN((char*)buf);
     }
@@ -305,7 +305,6 @@ void WifiConnectSTA()
 //-----------------------------------------------------------------------------
 void TransparentIo()
 {
-  //BUILTIN_LED_ON();
   size_t avail = 0;
   size_t toRead = 0;
 
@@ -316,10 +315,12 @@ void TransparentIo()
     toRead = (avail > sizeof(ipBuf)) ? sizeof(ipBuf) : avail;
     if (toRead)
     {
-      toRead = tcpClient.readBytes(ipBuf, toRead);
+      toRead = tcpClient.read(ipBuf, toRead);
       DPPRINT(F("ip Read = ")); DPPRINTLN(toRead, DEC);
+      //digitalWrite(RS_pin, 1); // Передача
       Serial.write(ipBuf, toRead);
-      Serial.flush();
+      //Serial.flush();
+      //digitalWrite(RS_pin, 0); // Прием
       DPPRINT(F("serial Write = ")); DPPRINTLN(toRead, DEC);
       lastSource = SOURCE_TCP;
       lastActivityMillis = millis();
@@ -336,51 +337,52 @@ void TransparentIo()
       udpRemoteIp = udp.remoteIP();
       udpRemotePort = udp.remotePort();
       udp.read(ipBuf, toRead);
+      //digitalWrite(RS_pin, 1); // Передача
       Serial.write(ipBuf, toRead);
-      Serial.flush();
+      //Serial.flush();
+      //digitalWrite(RS_pin, 0); // Прием
       lastSource = SOURCE_UDP;
       lastActivityMillis = millis();
       //lastByteMicros = micros();
     }
   }
   // вычитываем всё, что есть в serial в буфер
-  while (0 < (avail = Serial.available()) && 0 < sizeof(serBuf) - serPos)
+  while (0 < (avail = Serial.available()) && sizeof(serBuf) > serCount )
   {
-    size_t rest = sizeof(serBuf) - serPos;
+    size_t rest = sizeof(serBuf) - serCount;
     toRead = (avail > rest) ? rest : avail;
     if (toRead)
     {
-      toRead = Serial.readBytes(serBuf + serPos, toRead);
+      toRead = Serial.read(serBuf + serCount, toRead);
       DPPRINT(F("serial Readed = ")); DPPRINTLN(toRead, DEC);
-      serPos += toRead;
+      serCount += toRead;
       serLastByteMicros = micros();
     }
   }
   // Сборка и отправка по таймауту "тишины" (микросекунды)
-  if (0 < serPos && (micros() - serLastByteMicros > charTimeoutMicros))
+  if ( sizeof(serBuf) <= serCount
+       || (0 < serCount && (micros() - serLastByteMicros > charTimeoutMicros)))
   {
     switch (lastSource)
     {
       default: break;
       case SOURCE_TCP:
-        tcpClient.write(serBuf, serPos);
+        tcpClient.write(serBuf, serCount);
         //tcpClient.flush();
-        DPPRINT(F("serial to TcpIp = ")); DPPRINTLN(serPos, DEC);
+        DPPRINT(F("serial to TcpIp = ")); DPPRINTLN(serCount, DEC);
         break;
       case SOURCE_UDP:
         udp.beginPacket(udpRemoteIp, udpRemotePort);
-        udp.write(serBuf, serPos);
+        udp.write(serBuf, serCount);
         udp.endPacket();
         //udp.flush();
         break;
     }
-    serPos = 0;
+    serCount = 0;
   }
   // сбрасываем зависший источник
   if (lastSource != NONE && (millis() - lastActivityMillis > channelTimeoutMillis))
     lastSource = NONE;
-
-  //BUILTIN_LED_OFF();
 }
 //-----------------------------------------------------------------------------
 void CheckTcpConnect()
@@ -409,7 +411,7 @@ void CheckTcpConnect()
     tcpClient.setNoDelay(true);
     //tcpClient.setTimeout(Server_Timeout);// default 1000
     DPPRINT(F("Connected socket client: "));
-    DPPRINTLN(tcpClient.localIP());
+    DPPRINTLN(tcpClient.remoteIP());
     DPPRINT(F("condition = ")); DPPRINTLN(wifiCondition, DEC);
     ClearSerial();
   }
